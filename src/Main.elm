@@ -1,14 +1,13 @@
 module Main exposing (..)
 
 import Dict exposing (Dict)
-import Parser exposing ((|.), (|=), Parser, Step(..), andThen, chompIf, chompUntil, chompWhile, getChompedString, getCol, getIndent, keyword, loop, map, number, oneOf, problem, spaces, succeed, symbol, withIndent)
-import Parser exposing (end)
-import Parser exposing (chompUntilEndOr)
+import Html exposing (a)
+import Parser exposing ((|.), (|=), Parser, Step(..), andThen, chompIf, chompUntil, chompUntilEndOr, chompWhile, end, getChompedString, getCol, getIndent, keyword, loop, map, number, oneOf, problem, spaces, succeed, symbol, withIndent)
 
 
 type alias Domain =
     { name : String
-    , description : Maybe String
+    , description : List String
     , actors : Dict ViewElementKey Data
     , elements : Dict ViewElementKey Node
     }
@@ -54,21 +53,25 @@ type alias ViewRelationPoint =
     }
 
 
-{-| Only ' ' or nothing -}
+{-| Only ' ' or nothing
+-}
 onlySpace : Parser ()
 onlySpace =
     chompWhile (\c -> c == ' ')
 
 
-{-| Only \n -}
-isNewLine : Parser ()
-isNewLine =
+{-| Only \\n or end
+-}
+isNewLineOrEnd : Parser ()
+isNewLineOrEnd =
     oneOf
         [ symbol "\n"
         , end
         ]
 
 
+{-| Only :
+-}
 isSeparator : Parser ()
 isSeparator =
     symbol ":"
@@ -110,19 +113,71 @@ domain : Parser Domain
 domain =
     succeed Domain
         |. onlySpace
-        |. addIndent (nameNode "domain")
+        |. addIndent (keyValue "domain")
         |. onlySpace
         |. indented
         |= addIndent (namedNode "name")
-        |= succeed Nothing
+        |= listOrEnd (namedMultiline "description")
         |= succeed Dict.empty
         |= succeed Dict.empty
+
+
+maybeOrEnd : Parser (Maybe a) -> Parser (Maybe a)
+maybeOrEnd innerParser =
+    oneOf
+        [ succeed identity
+            |. onlySpace
+            |. indented
+            |= addIndent innerParser
+        , succeed Nothing
+            |. spaces
+            |. end
+        ]
+
+listOrEnd : Parser (List a) -> Parser (List a)
+listOrEnd innerParser =
+    oneOf
+        [ succeed identity
+            |. onlySpace
+            |. indented
+            |= addIndent innerParser
+        , succeed []
+            |. spaces
+            |. end
+        ]
+
+
+namedNodeOrNothing : String -> Parser (Maybe String)
+namedNodeOrNothing nodeNameValue =
+    oneOf
+        [ succeed (\v -> Just v)
+            |. keyword nodeNameValue
+            |. isSeparator
+            |. onlySpace
+            |= oneLineValue
+            |. onlySpace
+            |. isNewLineOrEnd
+        , succeed Nothing
+        ]
+
+namedMultiline : String -> Parser (List String)
+namedMultiline nodeNameValue =
+    oneOf
+        [ succeed identity
+            |. keyword nodeNameValue
+            |. isSeparator
+            |. onlySpace
+            |= multiLineValue
+            |. onlySpace
+            |. isNewLineOrEnd
+        , succeed []
+        ]
 
 
 views : Parser (Dict String View)
 views =
     succeed identity
-        |. addIndent (nameNode "views")
+        |. addIndent (keyValue "views")
         |= succeed Dict.empty
 
 
@@ -138,18 +193,18 @@ namedNode nodeNameValue =
         |. keyword nodeNameValue
         |. isSeparator
         |. onlySpace
-        |= value
+        |= oneLineValue
         |. onlySpace
-        |. isNewLine
+        |. isNewLineOrEnd
 
 
-nameNode : String -> Parser ()
-nameNode name =
+keyValue : String -> Parser ()
+keyValue name =
     succeed ()
         |. keyword name
         |. isSeparator
         |. onlySpace
-        |. isNewLine
+        |. isNewLineOrEnd
 
 
 
@@ -158,34 +213,52 @@ nameNode name =
 
 multiLineValue : Parser (List String)
 multiLineValue =
-    loop (0, []) stepMultiLineValue
+    loop ( ( 0, 0 ), [] ) stepMultiLineValue
 
 
-stepMultiLineValue : (Int, List String) -> Parser (Step (Int, List String) (List String))
-stepMultiLineValue (indent, state) =
-    succeed identity
-        |. onlySpace
-        |= (getCol |> map (Debug.log "getCol"))
-        |> andThen (checkIndentHelp (indent, state))
+stepMultiLineValue : ( ( Int, Int ), List String ) -> Parser (Step ( ( Int, Int ), List String ) (List String))
+stepMultiLineValue ( indent, state ) =
+    oneOf
+        [ succeed (Done (List.reverse state))
+            |. end
+        , succeed identity
+            |. onlySpace
+            |= (getCol |> map (Debug.log "getCol"))
+            |> andThen (checkIndentHelp ( indent, state ))
+        ]
 
 
-checkIndentHelp : (Int, List String) -> Int -> Parser (Step (Int, List String) (List String))
-checkIndentHelp (indent, state) column =
+checkIndentHelp : ( ( Int, Int ), List String ) -> Int -> Parser (Step ( ( Int, Int ), List String ) (List String))
+checkIndentHelp ( ( col, row ), state ) column =
     let
-        _ = Debug.log "state" (indent, state)
-        _ = Debug.log "column" column
+        _ =
+            Debug.log "state" ( ( col, row ), state )
+
+        _ =
+            Debug.log "column" column
     in
-    if indent <= column then
-        succeed (\nextValue -> Loop (if indent == 0 then column else indent, (nextValue :: state)))
-            |= value
-            |. isNewLine
+    if col <= column then
+        -- we need to skip the first iteration as indent = 0 there
+        succeed
+            (\nextValue ->
+                Loop
+                    ( if col == 0 then
+                        ( column, row )
+
+                      else
+                        ( col, row )
+                    , nextValue :: state
+                    )
+            )
+            |= oneLineValue
+            |. oneOf [ isNewLineOrEnd, end ]
 
     else
         succeed () |> map (\_ -> Done (List.reverse state))
 
 
-value : Parser String
-value =
+oneLineValue : Parser String
+oneLineValue =
     succeed ()
         |. chompIf (\c -> c /= ' ')
         |. chompUntilEndOr "\n"
